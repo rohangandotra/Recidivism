@@ -1,0 +1,414 @@
+---
+title: "Final Assignment"
+author: "Belen Herce-Hagiwara, Luo Yang, Phuc Huynh (Philip) Le, and Rohan Gandotra"
+date: "05/11/2020"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = TRUE)
+
+# NOTE TO PROFESSOR KUIPER: 
+### For the "testingdata", please go to line 382 to start.
+
+# ipak function: install and load multiple R packages.
+# Check to see if packages are installed. Install them if they are not, then load them into the R session.
+# References: https://gist.github.com/stevenworthington/3178163
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+OurPackages = c("caret", "CarletonStats", "corrplot", "cowplot", "datasets", "dplyr", "factoextra", 
+                "ggplot2", "gridExtra", "leaps", "manipulate", "mosaic", "MuMIn", 
+                "plyr", "pROC", "randomForest", "readr", "tidyr", "tree", "car")
+ipak(OurPackages)
+```
+
+### Read the CrimeData 
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+# Read the Crime Data (Change command if necessary)
+CrimeData <- read_csv("CrimeData.csv")
+# Format variables for visualizing
+CrimeData$age <- as.numeric(CrimeData$age)
+CrimeData$is_recid <- as.factor(CrimeData$is_recid)
+```
+
+### Visualize the data
+```{r warning=FALSE, message=FALSE, echo=FALSE, fig.height = 5, fig.width = 7}
+# Run mplot(CrimeData) in the ** Console **, then choose "2" for "2-variable (scatter, boxplot, etc.)"
+# Click the configure symbol and play with different variables
+#   (Choose Graphics System: ggplot2, Type of plot: scatter, Model: linear, Color: is_recid)
+#   (Make sure is_recid is not the x- or y-var)
+plot1 <- ggplot(data = CrimeData, aes(x = sex, y = charges)) + 
+  geom_boxplot(aes(fill = is_recid)) +
+  geom_point(aes(y = charges, group = is_recid, color = is_recid, alpha = 0.3), 
+             shape = 1,
+             position = position_dodge(width = 0.75)) +
+  facet_wrap( ~ marital, scales="free", ncol = 4, nrow = 2) +
+  labs(x = "Sex",
+       y = "Number of charges") +
+  scale_fill_discrete(name = "Did they recidivate?", labels = c("No", "Yes")) +
+  #scale_y_continuous() + 
+  scale_alpha(guide = "none") +
+  guides(color = FALSE) +
+  theme(axis.line = element_line(linetype = "solid"),
+        axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black")) +
+  theme(panel.background = element_rect(fill = "transparent", colour = NA),
+        panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(),
+        plot.background = element_rect(fill = "transparent", colour = NA))
+
+plot1
+
+# Change the facet labels
+# References: https://stackoverflow.com/a/12104207
+recidivate <- c("0" = "Did not recidivate", "1" = "Recidivated")
+#recid_labeller <- function(variable,value){
+#  return(recidivate[value])
+#}
+recid_labeller <- function(variable,value){
+  if(variable == "is_recid") {
+    return(recidivate[value])
+  } else {
+    return(as.character(value))
+  }
+}
+
+plot2 <- ggplot(data = CrimeData, aes(x = age)) + 
+  geom_col(aes(y = priors), fill = "#3232ff", alpha = 0.5, na.action = "na.exclude") +
+  #geom_col(aes(y = arrests), fill = "#3232ff", alpha = 0.5, na.action = "na.exclude") +
+  #geom_col(aes(y = charges), fill = "#3232ff", alpha = 0.5, na.action = "na.exclude") +
+  facet_wrap(race ~ is_recid, scales="free", labeller = recid_labeller) +
+  labs(x = "Age",
+       y = "Number of charges") +
+  scale_alpha(guide = "none") +
+  scale_x_continuous() +
+  theme(axis.line = element_line(linetype = "solid"),
+        axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black")) +
+  theme(panel.background = element_rect(fill = "transparent", colour = NA),
+        panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(),
+        plot.background = element_rect(fill = "transparent", colour = NA))
+
+plot2
+```
+
+
+### Build models
+#### Clean the dataset before modeling and replace NA's with 0 to avoid compromising sample size
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+# Clean the dataset before modeling 
+crime = CrimeData %>%
+  # Based on Professor Kuiper's suggestion that the BLUE columns be removed before loading the data.
+  # In addition to those columns, the following columns were also omitted, leaving us with 56 variables (55 predictors and 1 outcome variable).
+  ##   id (because this may unnecessarily increases an individual's recidivism rate)
+  ##   name (because we removed first and last names already)
+  ##   age_cat (because the categorization system is biased)
+  ##   in and out dates (because we added the number of days spent in jail)
+  ##   r_charge_degree (because Professor Kuiper recommends avoiding using it)
+  ##   r_offense_date
+  ##   r_charge_desc (because Professor Kuiper says this information is useful to a reader of a police report but not for a data analyst)
+  ##   num_r_cases (because this should be used only as a response variable)
+  ##   r_days_from_arrest
+  ##   CFdegree_0, CFdegree_CO3, CFdegree_CT, CFdegree_MO3, CFdegree_NI0, CFdegree_TC4, CFdegree_TCX, CFdegree_X, CFdegree_XX (because there is confusion about these terms in the variable description)
+  select(-id, -name, -first, -last, -dob, -age_cat, -compas_screening_date, -in_date, -out_date, -c_case_number, -c_arrest_date, -c_offense_date, -c_charge_degree, -c_charge_desc, -r_case_number, -r_charge_degree, -r_offense_date, -r_charge_desc, -r_jail_in, -r_jail_out, -num_r_cases, -r_days_from_arrest, -is_violent_recid, -vr_case_number, -vr_charge_degree, -vr_offense_date, -vr_charge_desc, -ARdegree_0, -ARdegree_CO3, -ARdegree_CT, -ARdegree_F1, -ARdegree_F2, -ARdegree_F3, -ARdegree_F5, -ARdegree_F6, -ARdegree_F7, -ARdegree_M1, -ARdegree_M2, -ARdegree_M3, -ARdegree_MO3, -ARdegree_NI0, -ARdegree_TC4, -ARdegree_TCX, -ARdegree_X, -ARdegree_XXX, -CFdegree_0, -CFdegree_CO3, -CFdegree_CT, -CFdegree_MO3, -CFdegree_NI0, -CFdegree_TC4, -CFdegree_TCX, -CFdegree_X, -CFdegree_XXX)
+
+# Find columns with NA's value
+# References: https://stackoverflow.com/a/20364707
+#colnames(crime)[apply(is.na(crime), 2, any)]
+#[1] "daysinprison"   "totalprison"    "CFdegree_F1"    "CFdegree_F2"    "CFdegree_F3"   
+#[6] "CFdegree_F5"    "CFdegree_F6"    "CFdegree_F7"    "CFdegree_M1"    "CFdegree_M2"   
+#[11] "CFdegree_M3"    "Fraud"          "Murder"         "Manslaughter"   "Officer"       
+#[16] "Physical"       "Sex"            "Weapon"         "Alcohol"        "Burglary"      
+#[21] "Disrupt"        "Drugs"          "Escape"         "Mischief"       "Obstruction"   
+#[26] "Other"          "Pedestrian"     "Substance"      "Tamper"         "Theft"         
+#[31] "Traffic"        "Trespass"       "Loiter"         "Chilren"        "Type_Accessory"
+#[36] "Type_Cocaine"   "Type_Heroin"    "Type_Marijuana" "Type_Meth"      "Type_Pharmacy" 
+#[41] "Type_Stalking"  "Type_Tobacco"  
+
+# Replace NA's with 0 to avoid compromising sample size
+crime[c("daysinprison", "totalprison", "CFdegree_F1", "CFdegree_F2", "CFdegree_F3", "CFdegree_F5", "CFdegree_F6", "CFdegree_F7", "CFdegree_M1", "CFdegree_M2", "CFdegree_M3", "Fraud", "Murder", "Manslaughter", "Officer", "Physical", "Sex", "Weapon", "Alcohol", "Burglary", "Disrupt", "Drugs", "Escape", "Mischief", "Obstruction", "Other", "Pedestrian", "Substance", "Tamper", "Theft", "Traffic", "Trespass", "Loiter", "Chilren", "Type_Accessory", "Type_Cocaine", "Type_Heroin", "Type_Marijuana", "Type_Meth", "Type_Pharmacy", "Type_Stalking", "Type_Tobacco")][is.na(crime[c("daysinprison", "totalprison", "CFdegree_F1", "CFdegree_F2", "CFdegree_F3", "CFdegree_F5", "CFdegree_F6", "CFdegree_F7", "CFdegree_M1", "CFdegree_M2", "CFdegree_M3", "Fraud", "Murder", "Manslaughter", "Officer", "Physical", "Sex", "Weapon", "Alcohol", "Burglary", "Disrupt", "Drugs", "Escape", "Mischief", "Obstruction", "Other", "Pedestrian", "Substance", "Tamper", "Theft", "Traffic", "Trespass", "Loiter", "Chilren", "Type_Accessory", "Type_Cocaine", "Type_Heroin", "Type_Marijuana", "Type_Meth", "Type_Pharmacy", "Type_Stalking", "Type_Tobacco")])] <- 0
+```
+
+### Create multiple sub-datasets
+#### One with all of the predictors (55), the best 27 predictors, the best 14 predictors, and the best 5 predictors
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+# Create multiple sub-datasets
+# Dataset with all of the predictors (55)
+crime55 = crime # AUC = 0.726
+
+# Dataset with the best 27 predictors
+crime27 = crime %>%
+  select(is_recid, age, arrests, charges, priors, days_in_jail, total_jail, totalprison, CFdegree_F2, CFdegree_F3, CFdegree_M1, CFdegree_M2, Fraud, Loiter, Physical, Weapon, Burglary, Drugs, Obstruction, Other, Theft, Alcohol, Traffic, Type_Cocaine, Type_Marijuana, Type_Heroin, Sex, Chilren)
+
+# Dataset with the best 14 predictors
+crime14 = crime %>%
+  select(is_recid, age, arrests, charges, priors, days_in_jail, totalprison, CFdegree_F2, CFdegree_F3, CFdegree_M1, Loiter, Drugs, Obstruction, Theft, Traffic) #AUC = 0.719
+
+# Dataset with the best 5 predictors
+crime5 = crime %>%
+  select(is_recid, age, arrests, charges, priors, days_in_jail) #AUC = 0.712
+```
+
+### Create testing and training data for each sub-dataset
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+# Create testing and training data
+set.seed(20200506)
+# Here we sample 5520 observations (66.67% of all observations) as our training data
+train <- createDataPartition(crime$is_recid, p = 2/3, list = FALSE, times = 1)
+crimeTrain <- crime[train,]
+crimeTest  <- crime[-train,]
+
+train27 <- createDataPartition(crime27$is_recid, p = 2/3, list = FALSE, times = 1)
+crime27Train <- crime27[train27,]
+crime27Test  <- crime27[-train27,]
+
+train14 <- createDataPartition(crime14$is_recid, p = 2/3, list = FALSE, times = 1)
+crime14Train <- crime14[train14,]
+crime14Test  <- crime14[-train14,]
+
+train5 <- createDataPartition(crime5$is_recid, p = 2/3, list = FALSE, times = 1)
+crime5Train <- crime5[train5,]
+crime5Test  <- crime5[-train5,]
+```
+
+
+### Make pairs plot for the crime data
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+pairs(~age+juv_fel_count+juv_misd_count+juv_other_count+charges+arrests+priors+days_in_jail+custody_before+total_jail+daysinprison+totalprison, data = crime, main = "Simple Scatterplot Matrix")
+```
+
+
+### Linear Regression Model: Testing Whole Model (55 Variables)
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+LinReg55 = lm(as.numeric(is_recid) ~ ., data = crime55, family = "binomial")
+summary(LinReg55)
+# Multiple R-squared:  0.1304
+```
+
+
+### Logistic Regression: Testing Whole Model (55-Variables)
+```{r warning = FALSE, message = FALSE, echo=FALSE}
+#General Linear Model 
+LogReg55 = glm(is_recid ~ ., data = crime55, family = "binomial")
+summary(LogReg55)
+
+# Apply the model on the testing dataset
+LogReg55.pred <- ifelse(LogReg55$fitted.values > 0.5, 1, 0)
+confusion55 <- table(LogReg55.pred, crime55$is_recid)
+addmargins(confusion55)
+#LogReg55.pred    0    1  Sum
+#          0   5095 1950 7045
+#          1    420  814 1234
+#          Sum 5515 2764 8279
+# Mean Classification Rate: (5095+814)/(5095+420+814+1950) = 0.7137335
+
+roc.info = roc(crime55$is_recid, LogReg55$fitted.values, plot = TRUE, legacy.axes = TRUE, 
+                main = "Logistic Regression: 55 Variables", xlab = "False Positive Percentage", ylab = "True Positive Percentage", 
+                print.auc = TRUE)
+# Area Under Curve (a quantitative measure for the accuracy of the model) = 0.726
+```
+<p>Specificity = TPP = 5095/5515 = `r 5095/5515`.
+<p>Sensitivity = 814/2764 = `r 814/2764`.
+<p>False Positive Percentage (FPP) = 1 - Specificity = 1 - 5095/5515 = `r 1-5095/5515`.
+<p>Mean Classification Rate: (5095+814)/(5095+420+814+1950) = `r (5095+814)/(5095+420+814+1950)`.
+<p>Area Under Curve = 0.726.
+
+
+### Logistic Regression: Testing The 27-Variable (and Interactions) Model
+```{r, warning = FALSE, message = FALSE}
+LogReg27 = glm(is_recid ~ .^2, data = crime27, family = "binomial")
+summary(LogReg27)
+
+# Apply the model on the testing dataset
+LogReg27.pred <- ifelse(LogReg27$fitted.values > 0.5, 1, 0)
+confusion27 <- table(LogReg27.pred, crime27$is_recid)
+addmargins(confusion27)
+#LogReg27.pred    0    1  Sum
+#          0   5023 1692 6715
+#          1    492 1072 1564
+#          Sum 5515 2764 8279
+# Mean Classification Rate: (5019+1061)/(5019+1703+496+1061) = 0.7343882
+
+roc.info = roc(crime27$is_recid, LogReg27$fitted.values, plot = TRUE, legacy.axes = TRUE, 
+                main = "Logistic Regression: 27 Variables + Interactions", xlab = "False Positive Percentage", ylab = "True Positive Percentage", 
+                print.auc = TRUE)
+# Area Under Curve (a quantitative measure for the accuracy of the model) = 0.759
+```
+<p>Specificity = TPP = 5023/5515 = `r 5023/5515`.
+<p>Sensitivity = 1072/2764 = `r 1072/2764`.
+<p>FPP = 1 - Specificity = 1 - 5023/5515 = `r 1-5023/5515`.
+<p>Mean Classification Rate: (5023+1072)/(5023+1692+492+1072) = `r (5023+1072)/(5023+1692+492+1072)`.
+<p>Area Under Curve = 0.759.
+
+
+### Logistic Regression: Testing 14-Variable Model
+```{r warning=FALSE, message=FALSE}
+LogReg14 = glm(is_recid ~ age + arrests + charges + priors + days_in_jail + totalprison + CFdegree_F2 + CFdegree_F3 + CFdegree_M1 + Loiter + Drugs + Obstruction + Theft + Traffic, data = crime14, family = "binomial")
+summary(LogReg14)
+
+# Apply the model on the testing dataset
+LogReg14.pred <- ifelse(LogReg14$fitted.values > 0.5, 1, 0)
+
+confusion14 <- table(LogReg14.pred, crime14$is_recid)
+addmargins(confusion14)
+#LogReg14.pred    0    1  Sum
+#          0   5139 2069 7208
+#          1    376  695 1071
+#          Sum 5515 2764 8279
+# Mean Classification Rate: (5139+695)/(5139+376+695+2069) = 0.7046745
+          
+roc.info <- roc(crime14$is_recid, LogReg14$fitted.values, plot = TRUE, legacy.axes = TRUE, 
+                main = "Logistic Regression: 14 Variables", xlab = "False Positive Percentage", ylab = "True Positive Percentage", 
+                print.auc = TRUE)
+# Area Under Curve (a quantitative measure for the accuracy of the model) = 0.719
+```
+<p>Specificity = TPP = 5139/5515 = `r 5139/5515`.
+<p>Sensitivity = 695/2764 = `r 695/2764`.
+<p>FPP = 1 - Specificity = 1 - 5139/5515 = `r 1-5139/5515`.
+<p>Mean Classification Rate: (5139+695)/(5139+376+695+2069) = `r (5139+695)/(5139+376+695+2069)`.
+<p>Area Under Curve = 0.719.
+
+
+### Logistic Regression: Testing 5-Variable Model
+```{r warning=FALSE, message=FALSE}
+LogReg5 = glm(is_recid ~ ., data = crime5, family = "binomial")
+summary(LogReg5)
+
+# Apply the model on the testing dataset
+LogReg5.pred <- ifelse(LogReg5$fitted.values > 0.5, 1, 0)
+confusion5 <- table(LogReg5.pred, crime5$is_recid)
+addmargins(confusion5)
+#LogReg5.pred    0    1  Sum
+#         0   5150 2125 7275
+#         1    365  639 1004
+#         Sum 5515 2764 8279
+# Mean Classification Rate: (5150+639)/(5150+2125+365+639) = 0.699239
+
+roc.info <- roc(crime5$is_recid, LogReg5$fitted.values, plot = TRUE, legacy.axes = TRUE, 
+                main = "Logistic Regression: 5 Variables", xlab = "False Positive Percentage", ylab = "True Positive Percentage", 
+                print.auc = TRUE)
+
+# Area Under Curve (a quantitative measure for the accuracy of the model) = 0.713
+```
+<p>Specificity = TPP = 5150/5515 = `r 5150/5515`.
+<p>Sensitivity = 639/2764 = `r 639/2764`.
+<p>FPP = 1 - Specificity = 1 - 5150/5515 = `r 1-5150/5515`.
+<p>Mean Classification Rate: (5150+639)/(5150+2125+365+639) = `r (5150+639)/(5150+2125+365+639)`.
+<p>Area Under Curve = 0.713
+
+
+### CART Analysis: Testing Whole Model
+```{r warning=FALSE, message=FALSE}
+# CART with Training Data
+tree1.crime <- tree(as.factor(is_recid) ~ ., data = crimeTrain) 
+summary(tree1.crime) 
+#Classification tree:
+#tree(formula = as.factor(is_recid) ~ ., data = crimeTrain)
+#Variables actually used in tree construction:
+#[1] "arrests" "age"     "charges"
+#Number of terminal nodes:  5 
+#Residual mean deviance:  1.154 = 6366 / 5515 
+#Misclassification error rate: 0.3047 = 1682 / 5520 
+
+plot(tree1.crime) 
+text(tree1.crime)
+
+# Apply the model on the testing dataset
+crime.pred <- predict(tree1.crime, crimeTest, type = "class")
+with(crimeTest, table(crime.pred, crimeTest$is_recid))
+#crime.pred    0    1
+#         0 1639  678
+#         1  199  243
+# Mean Classification Rate: (1639+243)/(1639+678+199+243) = 0.6821312
+```
+<p>Training data Accuracy = 1 - Misclassification error rate = 1 - 0.3047 = `r 1-0.3047`.
+<p>Testing data Accuracy = (1639+243)/(1639+678+199+243) = `r (1639+243)/(1639+678+199+243)`.
+
+### Random Forest: Testing Whole Model
+```{r eval=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+# Modeling (cont'd)
+# Using Caret to Create Random Forests
+#forest1 <- train(is_recid ~ ., data = crimeTrain)
+#forest1$finalModel
+#Call:
+# randomForest(x = x, y = y, mtry = param$mtry) 
+#               Type of random forest: classification
+#                     Number of trees: 500
+#No. of variables tried at each split: 2
+
+#        OOB estimate of  error rate: 29.46%
+#Confusion matrix:
+#     0   1 class.error
+#0 3378 299  0.08131629
+#1 1327 516  0.72002170
+
+# Evaluate final model by applying final model on our testing set.
+#forest1.pred <- predict(forest1, crimeTest)
+#with(crimeTest, table(forest1.pred, is_recid))
+#            is_recid
+#forest1.pred    0    1
+#           0 1682  681
+#           1  156  240
+
+# Suppose 1 is true and 0 is false. We have 240 true positives, 681 false positives, 1682 true negatives, and 156 false negative. We can compute accuracy by using the formula:
+# Accuracy = (True positive + true negative)/Total = (240+1682)/(240+681+1682+156) = 0.6966292.
+```
+<p>Accuracy = (240+1682)/(240+681+1682+156) = `r (240+1682)/(240+681+1682+156)`.
+
+
+### Analyze the "best model": 
+#### Make residual plots for the "best model"
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+residualPlots(LogReg5)
+```
+
+#### Split the testing confusion matrix using your “best model” by race to check for machinee bias
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+with(crime, table(LogReg5.pred, crime$race))
+#LogReg5.pred African-American Asian Caucasian Hispanic Native American Other
+#           0             3355    34      2706      703              24   453
+#           1              717     1       212       42               7    25
+```
+
+#### Read in the TestingData of Professor Kuiper
+```{r eval=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+# Read the testing data (Change command if necessary)
+Your_dataset <- read_csv("[Path to dataset]")
+
+# Format variables
+Your_dataset$age <- as.numeric(Your_dataset$age)
+Your_dataset$is_recid <- as.factor(Your_dataset$is_recid)
+
+# Clean the data
+testingData = Your_dataset %>% select(-id, -name, -first, -last, -dob, -age_cat, -compas_screening_date, -in_date, -out_date, -c_case_number, -c_arrest_date, -c_offense_date, -c_charge_degree, -c_charge_desc, -r_case_number, -r_charge_degree, -r_offense_date, -r_charge_desc, -r_jail_in, -r_jail_out, -num_r_cases, -r_days_from_arrest, -is_violent_recid, -vr_case_number, -vr_charge_degree, -vr_offense_date, -vr_charge_desc, -ARdegree_0, -ARdegree_CO3, -ARdegree_CT, -ARdegree_F1, -ARdegree_F2, -ARdegree_F3, -ARdegree_F5, -ARdegree_F6, -ARdegree_F7, -ARdegree_M1, -ARdegree_M2, -ARdegree_M3, -ARdegree_MO3, -ARdegree_NI0, -ARdegree_TC4, -ARdegree_TCX, -ARdegree_X, -ARdegree_XXX, -CFdegree_0, -CFdegree_CO3, -CFdegree_CT, -CFdegree_MO3, -CFdegree_NI0, -CFdegree_TC4, -CFdegree_TCX, -CFdegree_X, -CFdegree_XXX)
+
+testingData[c("daysinprison", "totalprison", "CFdegree_F1", "CFdegree_F2", "CFdegree_F3", "CFdegree_F5", "CFdegree_F6", "CFdegree_F7", "CFdegree_M1", "CFdegree_M2", "CFdegree_M3", "Fraud", "Murder", "Manslaughter", "Officer", "Physical", "Sex", "Weapon", "Alcohol", "Burglary", "Disrupt", "Drugs", "Escape", "Mischief", "Obstruction", "Other", "Pedestrian", "Substance", "Tamper", "Theft", "Traffic", "Trespass", "Loiter", "Chilren", "Type_Accessory", "Type_Cocaine", "Type_Heroin", "Type_Marijuana", "Type_Meth", "Type_Pharmacy", "Type_Stalking", "Type_Tobacco")][is.na(testingData[c("daysinprison", "totalprison", "CFdegree_F1", "CFdegree_F2", "CFdegree_F3", "CFdegree_F5", "CFdegree_F6", "CFdegree_F7", "CFdegree_M1", "CFdegree_M2", "CFdegree_M3", "Fraud", "Murder", "Manslaughter", "Officer", "Physical", "Sex", "Weapon", "Alcohol", "Burglary", "Disrupt", "Drugs", "Escape", "Mischief", "Obstruction", "Other", "Pedestrian", "Substance", "Tamper", "Theft", "Traffic", "Trespass", "Loiter", "Chilren", "Type_Accessory", "Type_Cocaine", "Type_Heroin", "Type_Marijuana", "Type_Meth", "Type_Pharmacy", "Type_Stalking", "Type_Tobacco")])] <- 0
+
+
+# Dataset with the best 27 predictors
+test27 = testingData %>%
+  select(is_recid, age, arrests, charges, priors, days_in_jail, total_jail, totalprison, CFdegree_F2, CFdegree_F3, CFdegree_M1, CFdegree_M2, Fraud, Loiter, Physical, Weapon, Burglary, Drugs, Obstruction, Other, Theft, Alcohol, Traffic, Type_Cocaine, Type_Marijuana, Type_Heroin, Sex, Chilren)
+
+
+# The 27-Variable (and Interactions) Model
+LogReg27_new = glm(is_recid ~ .^2, data = test27, family = "binomial")
+##summary(LogReg27)
+
+
+# Apply the model on the testing dataset
+LogReg27_new.pred <- ifelse(LogReg27_new$fitted.values > 0.5, 1, 0)
+confusion27_new <- table(LogReg27_new.pred, test27$is_recid)
+addmargins(confusion27_new)
+
+
+roc.info = roc(test27$is_recid, LogReg27$fitted.values, plot = TRUE, legacy.axes = TRUE, main = "Logistic Regression: 27 Variables + Interactions", xlab = "False Positive Percentage", ylab = "True Positive Percentage", print.auc = TRUE)
+```
